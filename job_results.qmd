@@ -1,0 +1,453 @@
+---
+title: TERR
+---
+
+```{r}
+knitr::opts_chunk$set(
+  message = F,
+  warning = F
+  
+)
+```
+
+
+# Prep
+
+```{r}
+knitr::opts_chunk$set(
+  message = F,
+  warning = F
+  
+)
+library(here)
+```
+
+
+# Prep
+
+## Function
+
+```{r}
+# function
+source(
+  here("source", "utils.r")
+)
+# variables
+
+source(
+  here("source", "env.r")
+)
+```
+
+
+## Load
+
+```{r}
+# job_binary |> write.csv("./data/results.csv", row.names = F)
+job_binary <- read.csv("./data/results.csv") 
+```
+
+## Dep
+
+```{r}
+correction1 <- job_binary %>%
+  summarise(mean = mean(sw * (sqrt(var0) + sqrt(var1)))) %>%
+  pull()
+Rsquared <- job_binary %>%
+  group_by(A) %>%
+  summarise(condvar = mean(sw * (Y - A * mu1 - (1 - A) * mu0)^2), marvar = mean(sw * Y))
+correction2 <- Rsquared %>%
+  summarise(sum(sqrt(condvar))) %>%
+  pull()
+```
+
+```{r}
+correction1
+```
+
+```{r}
+Rsquared
+```
+
+```{r}
+correction2
+```
+
+
+# Result CVAr
+
+## If Functions
+
+```{r}
+# functions if
+source(
+  here("source", "calculate_if.r")
+)
+
+# plot
+source(
+  here("source", "plots.r")
+)
+
+# CVAr
+source(
+  here("source", "calculate_cvar.r")
+)
+
+
+```
+
+
+## CVaR(tau) - Done
+
+### Arrangement
+
+
+```{r}
+ps <- seq(0.01, 1, 0.01)
+
+CVaR <- map_df(ps, \(x) cvar_calculate(job_binary, x, tau='tau', method_if = cvar_if1)) 
+# CVaR |> 
+#    mutate(CVaR = Rearrangement:: rearrangement(list(ps), CVaR, n = 1000)) %>%
+#   plot_cvar()
+# CVaR |> tail()
+```
+
+### No Arrangement
+
+
+```{r}
+# job_cvar_notrearranged <- CVaR %>% plot_cvar()
+# job_cvar_notrearranged
+```
+
+## CVAR Plugin - Done
+
+
+```{r}
+map_df(ps, \(x) cvar_calculate(job_binary,p= x, method_if = cvar_if_plugin1)) |> 
+head()#|> 
+  #  mutate(CVaR = rearrangement(list(ps), CVaR, n = 1000)) %>%
+  # plot_cvar()
+```
+
+
+
+## CVaR(tau) with bad controls 
+
+```{r}
+# CVaR(tau) with bad controls
+Xbad <- c("age", "Paris_region", "African", "High_school_dropout")
+tau.bad.pred <- predict(lm(formula = as.formula(paste("(2*A-1)*ipw*Y ~ (", paste(Xbad, collapse = " + "), ")")), data = job_binary, weights = job_binary$sw))
+job_binary <- job_binary %>% mutate(
+  tau_bad = tau.bad.pred,
+)
+
+job_binary |> write.csv("./data/results.csv", row.names = F)
+
+cvar_bad <- function(data, tau_bad, p) {
+  tau <- data |> pull(tau_bad)
+  sw <- data |> pull(sw)
+  q <- wtdquantile(tau, sw, p)
+  data |> 
+    mutate(IF = cvar_if_bad(q, mu1, mu0, A, ipw, Y, p, tau_bad)) |> 
+    summarise_IF(p)
+}
+
+```
+
+```{r}
+map_df(ps, \(x) cvar_bad(job_binary, p = x)) |> 
+  mutate(CVaR = rearrangement(list(ps), CVaR, n = 1000)) %>%
+  plot_cvar()
+```
+
+
+
+
+## CVaR(tau)-ATE - Done
+
+
+```{r}
+CVaRmATE <- 
+  map_df(ps, \(x) cvar_calculate(job_binary,p= x, method_if = cvar_if_tauate1)) 
+# CVaRmATE|>
+#   mutate(CVaR = rearrangement(list(ps), CVaR, n = 1000)) %>%
+#   plot_cvar()
+```
+
+
+# Group
+
+```{r}
+knitr::opts_chunk$set(
+  eval = T
+)
+```
+
+
+
+
+## Range-based bounds vs ATE
+
+```{r,  cache=T}
+# Range-based bounds vs ATE
+
+ps <- seq(0.01, 1, 0.01)
+bs <- seq(0, .25, .05)
+CVaR.bbound.mATE <- foreach(p = ps, .combine = rbind) %do% {
+  foreach(b = bs, .combine = rbind) %do% {
+    q = wtdquantile(c(job_binary$tau+b,job_binary$tau-b),c(job_binary$sw,job_binary$sw),p) 
+    # q <- wtdquantile(, c(job_binary$sw, job_binary$sw), p)
+    job_binary %>%
+      mutate(IF = cvar_bbound_mate(q, p, mu1, mu0, A, ipw, Y, tau, b)) %>%
+      summarise(p = p, q=q, b = b, CVaR = mean(sw * IF, na.rm = T), CVaR.se = sd(sw * IF, na.rm = T) / sqrt(n()))
+  }
+}
+CVaR.bbound.mATE |> 
+  write_csv(here::here("data", "g1_bbound_mate.csv"))
+```
+
+
+```{r}
+foreach(i=1:3, .combine = bind_rows) %do% {
+  foreach(j=1:100, .combine = bind_rows) %do% {
+    z = sqrt(i) + sqrt(j)
+    tibble(p = i, q=j, z = z)
+  }
+}
+```
+
+
+
+
+
+
+
+
+
+
+```{r}
+CVaR.bbound.mATE %>%
+  mutate(b = as.factor(b)) %>%
+  
+  group_by(b) %>%
+  mutate(CVaR = rearrangement(list(ps), CVaR, n = 1000)) %>%
+  plot_cvar_groups(
+  # data = CVaR.bbound.mATE, 
+  x = "p", y = "CVaR", 
+  ymax = "CVaR + zz * CVaR.se", ymin = "CVaR - zz * CVaR.se",
+  color = "b", fill = "b",
+  ylab_text = "CVaR", xlab_text = "alpha"
+)
+```
+
+
+
+```{r}
+df_bounded <- 
+  job_bounded_bounds <- bind_rows(
+    CVaRmATE %>% mutate(b = NA_real_, Type = "CATE-CVaR"),
+    CVaR.bbound.mATE %>% 
+      filter(b > 0) %>% 
+      # select(q) |> 
+      mutate(Type = "Thm. 3.2"),
+    
+    foreach(b = bs, .combine = rbind) %do%
+      {
+        CVaRmATE %>% mutate(CVaR = (CVaR - b) * (p < 1), b = b, Type = "Thm. 3.3")
+      } %>% filter(b > 0)
+  ) %>%
+  mutate(
+    Type = factor(Type, levels = c("CATE-CVaR", "Thm. 3.2", "Thm. 3.3")),
+    b = factor(b, levels = c("NA", bs[bs > 0]))
+  ) %>%
+  group_by(b, Type) %>%
+  mutate(CVaR = rearrangement(list(ps), CVaR, n = 1000)) 
+
+df_bounded |> 
+  write_csv(here::here("data", "g2_bbound.csv"))
+
+```
+
+
+```{r}
+plot_cvar_groups(
+  data = df_bounded, 
+  x = "p", y = "CVaR", 
+  ymax = "CVaR + zz * CVaR.se", ymin = "CVaR - zz * CVaR.se", 
+  color = "b", fill = "b", shape = "Type",
+  ylab_text = "${CVaR}_{\\alpha}-\\bar{\\tau}$", xlab_text = "$\\alpha$"
+)
+```
+
+## Variance-based bounds vs ATE
+
+
+```{r cache=T}
+# Variance-based bounds vs ATE
+
+totvar <- Rsquared %>%
+  summarise(sum(condvar)) %>%
+  pull()
+job_binary <- job_binary %>% 
+  mutate(
+    sdprod01 = sqrt(var0 * var1), 
+    varsum01 = var0 + var1
+  )
+
+
+CVaR.sbound.mATE <- foreach(p = ps, .combine = rbind) %do% {
+  foreach(rho = rhos, .combine = rbind) %do% {
+    q <- goldsectmax(
+      function(beta) {
+        (
+          job_binary %>% 
+            summarise(
+              beta + 
+                mean(
+                  sw * (
+                    tau - beta - sqrt((tau - beta)^2 + varsum01 - 2 * rho * sdprod01))
+                  ) / (2 * p)
+            ) %>% 
+            pull()
+        )
+      },
+      min(job_binary$tau) - 5 * totvar / max(p, .01),
+      max(job_binary$tau) + 5 * totvar / max(1. - p, .01),
+      tol = 1e-4, m = 1e3
+    )
+    # tibble(q = q, rho = rho, p = p)
+    job_binary %>%
+      mutate(IF = cvar_if_bbouns_ate(q, p, mu1, mu0, A, ipw, Y, tau, varsum01, rho, sdprod01)) %>%
+      summarise(p = p, q=q, rho = rho, CVaR = mean(sw * IF, na.rm = T), CVaR.se = sd(sw * IF, na.rm = T) / sqrt(n()))
+  }
+}
+```
+
+```{r}
+
+```
+
+
+```{r}
+set.seed(1210)
+rho_sample <- CVaR.sbound.mATE |> sample_n(7)
+rho_sample |> pull(p) |> paste(collapse = ", ") |> print()
+rho_sample |> pull(rho) |> paste(collapse = ", ") |> print()
+rho_sample
+```
+
+
+
+```{r cache=T}
+
+dfCVaR.sbound.mATE <- 
+  CVaR.sbound.mATE %>%
+  mutate(rho = as.factor(rho)) %>%
+  filter(p > .25) 
+dfCVaR.sbound.mATE |> 
+  write_csv(here("data", "g3_sbound_mate.csv"))
+```
+
+```{r}
+plot_cvar_groups(
+  data = dfCVaR.sbound.mATE, 
+  x = "p", y = "CVaR", 
+  ymax = "CVaR + zz * CVaR.se", ymin = "CVaR - zz * CVaR.se", 
+  color = "rho", fill = "rho",
+  ylab_text = "${CVaR}_{\\alpha}(\\tau(X))-\\bar\\tau$", xlab_text = "$\\alpha$"
+)
+```
+
+
+```{r cache=T}
+job_condvar_bounds <- rbind(
+  CVaRmATE %>% mutate(rho = "NA", type = "CATE-CVaR"),
+  CVaRmATE %>% mutate(rho = "NA", type = "Eq. (9) bound", CVaR = CVaR - correction1 / (2 * p)),
+  CVaRmATE %>% mutate(rho = "NA", type = "Eq. (10) bound", CVaR = CVaR - correction2 / (2 * p)),
+  CVaR.sbound.mATE %>% mutate(type = "Thm. 3.4 bound")
+) %>%
+  mutate(
+    Type = 
+      factor(
+        type, 
+        levels = 
+          c("CATE-CVaR", "Thm. 3.4 bound", "Eq. (9) bound", "Eq. (10) bound"), 
+        labels = c("CATE-CVaR", "Thm. 3.4", "Eq. (9)", "Eq. (10)")
+        ),
+    Correlation = factor(rho, levels = c("NA", rev(rhos)))
+  ) %>%
+  group_by(rho, type) %>%
+  mutate(CVaR = rearrangement(list(ps), CVaR, n = 1000)) %>%
+  filter(p >= .7) 
+job_condvar_bounds |> 
+  write_csv(here("data", "g4_condvar_bb.csv"))
+
+```
+
+```{r}
+plot_cvar_groups(
+  data = job_condvar_bounds, 
+  x = "p", y = "CVaR", 
+  ymax = "CVaR + zz * CVaR.se", ymin = "CVaR - zz * CVaR.se", 
+  color = "Correlation", fill = "Correlation", shape = "Type",
+  ylab_text = "${CVaR}_{\\alpha}-\\bar{\\tau}$", xlab_text = "$\\alpha$",
+  shape_legend_title = "Type", 
+  color_legend_title = "$\\rho$", 
+  fill_legend_title = "$\\rho$"
+)
+```
+
+
+## CVaR treatment effect
+
+```{r}
+# CVaR treatment effect
+CVaR.TE <- job_binary %>%
+  mutate(
+    sA = sw * A * ipw * Y,
+    sA1 = sw * (1 - A) * ipw * Y
+  ) |> 
+  summarise(
+    mu1 = mean(sA), 
+    se1 = sd(sA) / sqrt(n()), 
+    mu0 = mean(sA1), 
+    se0 = sd(sA1) / sqrt(n())
+  ) %>%
+  merge(
+    x = ., y = tibble(p = ps), all = True
+    ) %>%
+  mutate(
+    p1 = p> 1,
+    p_1 = 1 - p,
+    se_p = se1 / p,
+    cvar1 =    (p1 - mu1) * (mu1 - p_1) / p, 
+    cvar1.se = (p1 - mu1) * se_p, 
+    cvar0 =    (p1 - mu0) * (mu0 - p_1) / p, 
+    cvar0.se = (p1 - mu0) * se_p
+  ) %>%
+  mutate(
+    cvar.te = cvar1 - cvar0, 
+    cvar.te.se = sqrt(cvar1.se^2 + cvar0.se^2)
+    )
+
+job_cvar_te <- rbind(
+  CVaR.TE %>% mutate(cvar = cvar1, cvar.se = cvar1.se, Group = "A=1"),
+  CVaR.TE %>% mutate(cvar = cvar0, cvar.se = cvar0.se, Group = "A=0"),
+  CVaR.TE %>% mutate(cvar = cvar.te, cvar.se = cvar.te.se, Group = "Diff")
+) 
+
+
+```
+
+```{r}
+plot_cvar_groups(
+  data = job_cvar_te, 
+  x = "p", y = "cvar", 
+  ymax = "cvar + zz * cvar.se", ymin = "cvar - zz * cvar.se", 
+  color = "Group", fill = "Group",
+  ylab_text = "CVaR", xlab_text = "alpha"
+)
+```
+
